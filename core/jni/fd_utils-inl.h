@@ -59,6 +59,7 @@ static const char* kPathWhitelist[] = {
   "/dev/ion",
   "/dev/dri/renderD129", // Fixes b/31172436
   "/system/framework/org.cyanogenmod.platform-res.apk",
+  "/proc/ged"
 #ifdef PATH_WHITELIST_EXTRA_H
 PATH_WHITELIST_EXTRA_H
 #endif
