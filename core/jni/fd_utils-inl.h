@@ -36,8 +36,6 @@
 #include "JNIHelp.h"
 #include "ScopedPrimitiveArray.h"
 
-#include <fd_utils-inl-extra.h>
-
 // Whitelist of open paths that the zygote is allowed to keep open.
 //
 // In addition to the paths listed here, all files ending with
@@ -50,6 +48,7 @@
 // AF_UNIX socket, the socket will refer to /dev/null after each
 // fork, and all operations on it will fail.
 static const char* kPathWhitelist[] = {
+  "/dev/__properties__",  /* Only on Android Lollipop and below. */
   "/dev/null",
   "/dev/socket/zygote",
   "/dev/socket/zygote_secondary",
@@ -57,13 +56,9 @@ static const char* kPathWhitelist[] = {
   "/system/framework/framework-res.apk",
   "/dev/urandom",
   "/dev/ion",
-  "/dev/dri/renderD129", // Fixes b/31172436
+  "@netlink@",
   "/system/framework/org.cyanogenmod.platform-res.apk",
-  "/proc/ged",
-#ifdef PATH_WHITELIST_EXTRA_H
   "/proc/ged"
-PATH_WHITELIST_EXTRA_H
-#endif
 };
 
 static const char* kFdPath = "/proc/self/fd";
@@ -248,22 +243,9 @@ class FileDescriptorInfo {
     is_sock(false) {
   }
 
-  static bool StartsWith(const std::string& str, const std::string& prefix) {
-    return str.compare(0, prefix.size(), prefix) == 0;
-  }
-
-  static bool EndsWith(const std::string& str, const std::string& suffix) {
-    if (suffix.size() > str.size()) {
-      return false;
-    }
-
-    return str.compare(str.size() - suffix.size(), suffix.size(), suffix) == 0;
-  }
-
   // Returns true iff. a given path is whitelisted. A path is whitelisted
   // if it belongs to the whitelist (see kPathWhitelist) or if it's a path
-  // under /system/framework that ends with ".jar" or if it is a system
-  // framework overlay.
+  // under /system/framework that ends with ".jar".
   static bool IsWhitelisted(const std::string& path) {
     for (size_t i = 0; i < (sizeof(kPathWhitelist) / sizeof(kPathWhitelist[0])); ++i) {
       if (kPathWhitelist[i] == path) {
@@ -273,41 +255,10 @@ class FileDescriptorInfo {
 
     static const std::string kFrameworksPrefix = "/system/framework/";
     static const std::string kJarSuffix = ".jar";
-    if (StartsWith(path, kFrameworksPrefix) && EndsWith(path, kJarSuffix)) {
+    if (path.compare(0, kFrameworksPrefix.size(), kFrameworksPrefix) == 0 &&
+        path.compare(path.size() - kJarSuffix.size(), kJarSuffix.size(), kJarSuffix) == 0) {
       return true;
     }
-
-    // Whitelist files needed for Runtime Resource Overlay, like these:
-    // /system/vendor/overlay/framework-res.apk
-    // /system/vendor/overlay-subdir/pg/framework-res.apk
-    // /data/resource-cache/system@vendor@overlay@framework-res.apk@idmap
-    // /data/resource-cache/system@vendor@overlay-subdir@pg@framework-res.apk@idmap
-    // See AssetManager.cpp for more details on overlay-subdir.
-    static const std::string kOverlayDir = "/system/vendor/overlay/";
-    static const std::string kVendorOverlayDir = "/vendor/overlay";
-    static const std::string kOverlaySubdir = "/system/vendor/overlay-subdir/";
-    static const std::string kApkSuffix = ".apk";
-
-    if ((StartsWith(path, kOverlayDir) || StartsWith(path, kOverlaySubdir)
-         || StartsWith(path, kVendorOverlayDir))
-        && EndsWith(path, kApkSuffix)
-        && path.find("/../") == std::string::npos) {
-      return true;
-    }
-
-    static const std::string kOverlayIdmapPrefix = "/data/resource-cache/";
-    static const std::string kOverlayIdmapSuffix = ".apk@idmap";
-    if (StartsWith(path, kOverlayIdmapPrefix) && EndsWith(path, kOverlayIdmapSuffix)
-        && path.find("/../") == std::string::npos) {
-      return true;
-    }
-
-    // All regular files that are placed under this path are whitelisted automatically.
-    static const std::string kZygoteWhitelistPath = "/vendor/zygote_whitelist/";
-    if (StartsWith(path, kZygoteWhitelistPath) && path.find("/../") == std::string::npos) {
-      return true;
-    }
-
     return false;
   }
 
@@ -346,6 +297,12 @@ class FileDescriptorInfo {
     if (TEMP_FAILURE_RETRY(getsockname(fd, addr, &addr_len)) == -1) {
       ALOGE("Failed getsockname(%d) : %s", fd, strerror(errno));
       return false;
+    }
+
+
+    if (addr->sa_family == AF_NETLINK) {
+      (*result) = "@netlink@";
+      return true;
     }
 
     if (addr->sa_family != AF_UNIX) {
@@ -399,7 +356,10 @@ class FileDescriptorInfo {
     return true;
   }
 
-  DISALLOW_COPY_AND_ASSIGN(FileDescriptorInfo);
+
+  // DISALLOW_COPY_AND_ASSIGN(FileDescriptorInfo);
+  FileDescriptorInfo(const FileDescriptorInfo&);
+  void operator=(const FileDescriptorInfo&);
 };
 
 // A FileDescriptorTable is a collection of FileDescriptorInfo objects
@@ -538,7 +498,7 @@ class FileDescriptorTable {
 
         // Finally, remove the FD from the set of open_fds. We do this last because
         // |element| will not remain valid after a call to erase.
-        open_fds.erase(element);
+        open_fds.erase(*element);
       }
     }
 
@@ -588,5 +548,7 @@ class FileDescriptorTable {
   // Invariant: All values in this unordered_map are non-NULL.
   std::unordered_map<int, FileDescriptorInfo*> open_fd_map_;
 
-  DISALLOW_COPY_AND_ASSIGN(FileDescriptorTable);
+  // DISALLOW_COPY_AND_ASSIGN(FileDescriptorTable);
+  FileDescriptorTable(const FileDescriptorTable&);
+  void operator=(const FileDescriptorTable&);
 };
