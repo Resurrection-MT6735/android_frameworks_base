@@ -1813,6 +1813,11 @@ public class PhoneStatusBar extends BaseStatusBar implements DemoMode,
     }
 
     @Override
+    public NetworkController getNetworkController() {
+        return mNetworkController;
+    }
+
+    @Override
     protected void onDensityOrFontScaleChanged() {
         super.onDensityOrFontScaleChanged();
         mScrimController.onDensityOrFontScaleChanged();
@@ -2271,9 +2276,9 @@ public class PhoneStatusBar extends BaseStatusBar implements DemoMode,
                     | WindowManager.LayoutParams.FLAG_SLIPPERY,
                 PixelFormat.TRANSLUCENT);
         // this will allow the navbar to run in an overlay on devices that support this
-/*        if (ActivityManager.isHighEndGfx()) {
+        if (ActivityManager.isHighEndGfx()) {
             lp.flags |= WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED;
-        }*/ //*Keep for possible future use.
+        }
 
         lp.setTitle("NavigationBar");
         lp.windowAnimations = 0;
@@ -2509,7 +2514,7 @@ public class PhoneStatusBar extends BaseStatusBar implements DemoMode,
     }
 
     @Override
-    protected void performRemoveNotification(StatusBarNotification n) {
+    public void performRemoveNotification(StatusBarNotification n) {
         Entry entry = mNotificationData.get(n.getKey());
         if (mRemoteInputController.isRemoteInputActive(entry)) {
             mRemoteInputController.removeRemoteInput(entry, null);
@@ -2840,6 +2845,9 @@ public class PhoneStatusBar extends BaseStatusBar implements DemoMode,
 
         updateNotificationShade();
         mIconController.updateNotificationIcons(mNotificationData);
+        if (mPieController != null) {
+            mPieController.updateNotifications();
+        }
     }
 
     public void requestNotificationUpdate() {
@@ -4300,9 +4308,6 @@ public class PhoneStatusBar extends BaseStatusBar implements DemoMode,
 
     @Override
     public void topAppWindowChanged(boolean showMenu) {
-        if (mPieController != null && mPieController.getControlPanel() != null)
-            mPieController.getControlPanel().setMenu(showMenu);
-
         if (SPEW) {
             Log.d(TAG, (showMenu?"showing":"hiding") + " the MENU button");
         }
@@ -4743,7 +4748,7 @@ public class PhoneStatusBar extends BaseStatusBar implements DemoMode,
                 notifyHeadsUpScreenOff();
                 finishBarAnimations();
                 resetUserExpandedStates();
-                // detach PA Pie when screen is turned off
+                // detach pie when screen is turned off
                 if (mPieController != null) mPieController.detachPie();
             }
             else if (Intent.ACTION_SCREEN_ON.equals(action)) {

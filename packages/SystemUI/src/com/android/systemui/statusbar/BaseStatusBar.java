@@ -23,7 +23,6 @@ import android.annotation.ChaosLab;
 import android.annotation.ChaosLab.Classification;
 import android.app.Activity;
 import android.app.ActivityManager;
-import android.app.ActivityManager.RunningAppProcessInfo;
 import android.app.ActivityManager.StackId;
 import android.app.ActivityManagerNative;
 import android.app.ActivityOptions;
@@ -46,10 +45,8 @@ import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.content.pm.PackageManager.NameNotFoundException;
-import android.content.pm.ResolveInfo;
 import android.content.pm.UserInfo;
 import android.content.res.Configuration;
-import android.content.ServiceConnection;
 import android.database.ContentObserver;
 import android.graphics.Rect;
 import android.graphics.PixelFormat;
@@ -67,7 +64,6 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Message;
-import android.os.Messenger;
 import android.os.PowerManager;
 import android.os.Process;
 import android.os.RemoteException;
@@ -86,6 +82,7 @@ import android.service.vr.IVrStateCallbacks;
 import android.text.TextUtils;
 import android.util.ArraySet;
 import android.util.Log;
+import android.util.Pair;
 import android.util.Slog;
 import android.util.SparseArray;
 import android.util.SparseBooleanArray;
@@ -94,6 +91,7 @@ import android.view.Gravity;
 import android.view.IWindowManager;
 import android.view.LayoutInflater;
 import android.view.MotionEvent;
+import android.view.OrientationEventListener;
 import android.view.View;
 import android.view.ViewAnimationUtils;
 import android.view.ViewGroup;
@@ -102,7 +100,6 @@ import android.view.ViewParent;
 import android.view.WindowManager;
 import android.view.WindowManagerGlobal;
 import android.view.accessibility.AccessibilityManager;
-import android.view.OrientationEventListener;
 import android.widget.ImageView;
 import android.widget.RemoteViews;
 import android.widget.TextView;
@@ -138,8 +135,9 @@ import com.android.systemui.statusbar.phone.NotificationGroupManager;
 import com.android.systemui.statusbar.phone.NotificationPanelView;
 import com.android.systemui.statusbar.phone.StatusBarKeyguardViewManager;
 import com.android.systemui.statusbar.phone.SystemUIDialog;
-import com.android.systemui.statusbar.pie.PieController;
 import com.android.systemui.statusbar.policy.HeadsUpManager;
+import com.android.systemui.statusbar.policy.NetworkController;
+import com.android.systemui.statusbar.pie.PieController;
 import com.android.systemui.statusbar.policy.PreviewInflater;
 import com.android.systemui.statusbar.policy.RemoteInputView;
 import com.android.systemui.statusbar.stack.NotificationStackScrollLayout;
@@ -185,9 +183,6 @@ public abstract class BaseStatusBar extends SystemUI implements
     protected static final int MSG_SHOW_PREV_AFFILIATED_TASK = 1025;
     protected static final int MSG_TOGGLE_KEYBOARD_SHORTCUTS_MENU = 1026;
     protected static final int MSG_DISMISS_KEYBOARD_SHORTCUTS_MENU = 1027;
-    protected static final int MSG_TOGGLE_LAST_APP = 1028;
-    protected static final int MSG_TOGGLE_KILL_APP = 1029;
-    protected static final int MSG_TOGGLE_SCREENSHOT = 1030;
 
     protected static final boolean ENABLE_HEADS_UP = true;
     protected static final String SETTING_HEADS_UP_TICKER = "ticker_gets_heads_up";
@@ -229,7 +224,7 @@ public abstract class BaseStatusBar extends SystemUI implements
     protected int mCurrentUserId = 0;
     final protected SparseArray<UserInfo> mCurrentProfiles = new SparseArray<UserInfo>();
 
-    // PA Pie controls
+    // Pie controls
     protected PieController mPieController;
     public int mOrientation = 0;
 
@@ -338,6 +333,30 @@ public abstract class BaseStatusBar extends SystemUI implements
 
     protected int mRecentsType;
 
+    public ArrayList<Pair<StatusBarNotification, Icon>> getNotifications() {
+        ArrayList<Pair<StatusBarNotification, Icon>> notifs
+                = new ArrayList<Pair<StatusBarNotification, Icon>>();
+        for (Entry entry : mNotificationData.getActiveNotifications()) {
+            StatusBarNotification sbn = entry.notification;
+            Icon icon = entry.notification.getNotification().getSmallIcon();
+            notifs.add(new Pair<StatusBarNotification, Icon>(sbn, icon));
+        }
+        return notifs;
+    }
+
+    public abstract NetworkController getNetworkController();
+
+    private final ContentObserver mPieSettingsObserver = new ContentObserver(mHandler) {
+        @Override
+        public void onChange(boolean selfChange) {
+            ContentResolver resolver = mContext.getContentResolver();
+            boolean pieEnabled = Settings.Secure.getIntForUser(resolver,
+                    Settings.Secure.PIE_STATE, 0, UserHandle.USER_CURRENT) == 1;
+
+            updatePieControls(!pieEnabled);
+        }
+    };
+
     @Override  // NotificationData.Environment
     public boolean isDeviceProvisioned() {
         return mDeviceProvisioned;
@@ -387,21 +406,6 @@ public abstract class BaseStatusBar extends SystemUI implements
             noMan.cancel(R.string.no_navigation_warning_title);
         }
     }
-
-    private final ContentObserver mPieSettingsObserver = new ContentObserver(mHandler) {
-        @Override
-        public void onChange(boolean selfChange) {
-            update();
-        }
-
-        private void update() {
-            ContentResolver resolver = mContext.getContentResolver();
-            boolean pieEnabled = Settings.System.getIntForUser(resolver,
-                    Settings.System.PA_PIE_STATE, 0, UserHandle.USER_CURRENT) == 1;
-
-            updatePieControls(!pieEnabled);
-        }
-    };
 
     protected final ContentObserver mSettingsObserver = new ContentObserver(mHandler) {
         @Override
@@ -997,19 +1001,18 @@ public abstract class BaseStatusBar extends SystemUI implements
                 com.android.internal.R.array.config_nonBlockableNotificationPackages));
 
         mPieSettingsObserver.onChange(false);
-        mContext.getContentResolver().registerContentObserver(Settings.System.getUriFor(
-                Settings.System.PA_PIE_STATE), false, mPieSettingsObserver);
-        mContext.getContentResolver().registerContentObserver(Settings.System.getUriFor(
-                Settings.System.PA_PIE_GRAVITY), false, mPieSettingsObserver);
-
+        mContext.getContentResolver().registerContentObserver(Settings.Secure.getUriFor(
+                Settings.Secure.PIE_STATE), false, mPieSettingsObserver);
+        mContext.getContentResolver().registerContentObserver(Settings.Secure.getUriFor(
+                Settings.Secure.PIE_GRAVITY), false, mPieSettingsObserver);
     }
 
     public void updatePieControls(boolean reset) {
         ContentResolver resolver = mContext.getContentResolver();
 
         if (reset) {
-            Settings.System.putIntForUser(resolver,
-                    Settings.System.PA_PIE_GRAVITY, 0, UserHandle.USER_CURRENT);
+            Settings.Secure.putIntForUser(resolver,
+                    Settings.Secure.PIE_GRAVITY, 0, UserHandle.USER_CURRENT);
             toggleOrientationListener(false);
         } else {
             getOrientationListener();
@@ -1020,8 +1023,9 @@ public abstract class BaseStatusBar extends SystemUI implements
             mPieController = PieController.getInstance();
             mPieController.init(mContext, mWindowManager, this);
         }
-        int gravity = Settings.System.getInt(resolver,
-                Settings.System.PA_PIE_GRAVITY, 0);
+
+        int gravity = Settings.Secure.getInt(resolver,
+                Settings.Secure.PIE_GRAVITY, 0);
         mPieController.resetPie(!reset, gravity);
     }
 
@@ -1031,8 +1035,8 @@ public abstract class BaseStatusBar extends SystemUI implements
                 // Do nothing if listener has already dropped
                 return;
             } else {
-                boolean shouldEnable = Settings.System.getIntForUser(mContext.getContentResolver(),
-                        Settings.System.PA_PIE_STATE, 0, UserHandle.USER_CURRENT) == 1;
+                boolean shouldEnable = Settings.Secure.getIntForUser(mContext.getContentResolver(),
+                        Settings.Secure.PIE_STATE, 0, UserHandle.USER_CURRENT) == 1;
                 if (shouldEnable) {
                     // Re-init Orientation listener for later action
                     getOrientationListener();
@@ -1198,7 +1202,6 @@ public abstract class BaseStatusBar extends SystemUI implements
         if (mAssistManager != null) {
             mAssistManager.onConfigurationChanged();
         }
-
         int rotation = mDisplay.getRotation();
         if (rotation != mOrientation) {
             if (mPieController != null) mPieController.detachPie();
@@ -1218,6 +1221,10 @@ public abstract class BaseStatusBar extends SystemUI implements
             }
             inflateViews(entry, mStackScroller);
         }
+        ContentResolver resolver = mContext.getContentResolver();
+        boolean pieEnabled = Settings.Secure.getIntForUser(resolver,
+                Settings.Secure.PIE_STATE, 0, UserHandle.USER_CURRENT) == 1;
+        updatePieControls(!pieEnabled);
     }
 
     protected void bindDismissListener(final ExpandableNotificationRow row) {
@@ -1231,7 +1238,7 @@ public abstract class BaseStatusBar extends SystemUI implements
         });
     }
 
-    protected void performRemoveNotification(StatusBarNotification n) {
+    public void performRemoveNotification(StatusBarNotification n) {
         final String pkg = n.getPackageName();
         final String tag = n.getTag();
         final int id = n.getId();
@@ -1619,27 +1626,6 @@ public abstract class BaseStatusBar extends SystemUI implements
     }
 
     @Override
-    public void toggleLastApp() {
-        int msg = MSG_TOGGLE_LAST_APP;
-        mHandler.removeMessages(msg);
-        mHandler.sendEmptyMessage(msg);
-    }
-
-    @Override
-    public void toggleKillApp() {
-        int msg = MSG_TOGGLE_KILL_APP;
-        mHandler.removeMessages(msg);
-        mHandler.sendEmptyMessage(msg);
-    }
-
-    @Override
-    public void toggleScreenshot() {
-        int msg = MSG_TOGGLE_SCREENSHOT;
-        mHandler.removeMessages(msg);
-        mHandler.sendEmptyMessage(msg);
-    }
-
-    @Override
     public void screenPinningStateChanged(boolean enabled) {
         if (mScreenPinningEnabled != enabled) {
             mScreenPinningEnabled = enabled;
@@ -2001,18 +1987,6 @@ public abstract class BaseStatusBar extends SystemUI implements
              case MSG_DISMISS_KEYBOARD_SHORTCUTS_MENU:
                   dismissKeyboardShortcuts();
                   break;
-             case MSG_TOGGLE_LAST_APP:
-                 if (DEBUG) Slog.d(TAG, "toggle last app");
-                 getLastApp();
-                 break;
-             case MSG_TOGGLE_KILL_APP:
-                 if (DEBUG) Slog.d(TAG, "toggle kill app");
-                 mHandler.post(mKillTask);
-                 break;
-             case MSG_TOGGLE_SCREENSHOT:
-                 if (DEBUG) Slog.d(TAG, "toggle screenshot");
-                 takeScreenshot();
-                 break;
             }
         }
     }
@@ -2543,7 +2517,7 @@ public abstract class BaseStatusBar extends SystemUI implements
         return true;
     }
 
-    protected Bundle getActivityOptions() {
+    public Bundle getActivityOptions() {
         // Anything launched from the notification shade should always go into the
         // fullscreen stack.
         ActivityOptions options = ActivityOptions.makeBasic();
@@ -3231,158 +3205,5 @@ public abstract class BaseStatusBar extends SystemUI implements
         lp.setTitle("AppCircleSidebar");
 
         return lp;
-    }
-
-    Runnable mKillTask = new Runnable() {
-        public void run() {
-            final Intent intent = new Intent(Intent.ACTION_MAIN);
-            String defaultHomePackage = "com.android.launcher";
-            intent.addCategory(Intent.CATEGORY_HOME);
-            final ResolveInfo res = mContext.getPackageManager().resolveActivity(intent, 0);
-            if (res.activityInfo != null && !res.activityInfo.packageName.equals("android")) {
-                defaultHomePackage = res.activityInfo.packageName;
-            }
-            boolean targetKilled = false;
-            final ActivityManager am = (ActivityManager) mContext
-                    .getSystemService(Activity.ACTIVITY_SERVICE);
-            List<RunningAppProcessInfo> apps = am.getRunningAppProcesses();
-            for (RunningAppProcessInfo appInfo : apps) {
-                int uid = appInfo.uid;
-                // Make sure it's a foreground user application (not system,
-                // root, phone, etc.)
-                if (uid >= Process.FIRST_APPLICATION_UID && uid <= Process.LAST_APPLICATION_UID
-                        && appInfo.importance == RunningAppProcessInfo.IMPORTANCE_FOREGROUND) {
-                    if (appInfo.pkgList != null && (appInfo.pkgList.length > 0)) {
-                        for (String pkg : appInfo.pkgList) {
-                            if (!pkg.equals("com.android.systemui")
-                                    && !pkg.equals(defaultHomePackage)) {
-                                am.forceStopPackage(pkg);
-                                targetKilled = true;
-                                break;
-                            }
-                        }
-                    } else {
-                        Process.killProcess(appInfo.pid);
-                        targetKilled = true;
-                    }
-                }
-                if (targetKilled) {
-                    Toast.makeText(mContext,
-                        R.string.app_killed_message, Toast.LENGTH_SHORT).show();
-                    break;
-                }
-            }
-        }
-    };
-
-    private void getLastApp() {
-        int lastAppId = 0;
-        int looper = 1;
-        String packageName;
-        final Intent intent = new Intent(Intent.ACTION_MAIN);
-        final ActivityManager am = (ActivityManager) mContext
-                .getSystemService(Activity.ACTIVITY_SERVICE);
-        String defaultHomePackage = "com.android.launcher";
-        intent.addCategory(Intent.CATEGORY_HOME);
-        final ResolveInfo res = mContext.getPackageManager().resolveActivity(intent, 0);
-        if (res.activityInfo != null && !res.activityInfo.packageName.equals("android")) {
-            defaultHomePackage = res.activityInfo.packageName;
-        }
-        List <ActivityManager.RunningTaskInfo> tasks = am.getRunningTasks(5);
-        // lets get enough tasks to find something to switch to
-        // Note, we'll only get as many as the system currently has - up to 5
-        while ((lastAppId == 0) && (looper < tasks.size())) {
-            packageName = tasks.get(looper).topActivity.getPackageName();
-            if (!packageName.equals(defaultHomePackage)
-                    && !packageName.equals("com.android.systemui")) {
-                lastAppId = tasks.get(looper).id;
-            }
-            looper++;
-        }
-        if (lastAppId != 0) {
-            am.moveTaskToFront(lastAppId, am.MOVE_TASK_NO_USER_ACTION);
-        }
-    }
-
-    final Runnable mScreenshotTimeout = new Runnable() {
-        @Override
-        public void run() {
-            synchronized (mScreenshotLock) {
-                if (mScreenshotConnection != null) {
-                    mContext.unbindService(mScreenshotConnection);
-                    mScreenshotConnection = null;
-                }
-            }
-        }
-    };
-
-    private final Object mScreenshotLock = new Object();
-    private ServiceConnection mScreenshotConnection = null;
-    private Handler mHDL = new Handler();
-
-    private void takeScreenshot() {
-        synchronized (mScreenshotLock) {
-            if (mScreenshotConnection != null) {
-                return;
-            }
-            ComponentName cn = new ComponentName("com.android.systemui",
-                    "com.android.systemui.screenshot.TakeScreenshotService");
-            Intent intent = new Intent();
-            intent.setComponent(cn);
-            ServiceConnection conn = new ServiceConnection() {
-                @Override
-                public void onServiceConnected(ComponentName name, IBinder service) {
-                    synchronized (mScreenshotLock) {
-                        if (mScreenshotConnection != this) {
-                            return;
-                        }
-                        Messenger messenger = new Messenger(service);
-                        Message msg = Message.obtain(null, 1);
-                        final ServiceConnection myConn = this;
-                        Handler h = new Handler(mHDL.getLooper()) {
-                            @Override
-                            public void handleMessage(Message msg) {
-                                synchronized (mScreenshotLock) {
-                                    if (mScreenshotConnection == myConn) {
-                                        mContext.unbindService(mScreenshotConnection);
-                                        mScreenshotConnection = null;
-                                        mHDL.removeCallbacks(mScreenshotTimeout);
-                                    }
-                                }
-                            }
-                        };
-                        msg.replyTo = new Messenger(h);
-                        msg.arg1 = msg.arg2 = 0;
-
-                        /*
-                         * remove for the time being if (mStatusBar != null &&
-                         * mStatusBar.isVisibleLw()) msg.arg1 = 1; if
-                         * (mNavigationBar != null &&
-                         * mNavigationBar.isVisibleLw()) msg.arg2 = 1;
-                         */
-
-                        /* wait for the dialog box to close */
-                        try {
-                            Thread.sleep(1000);
-                        } catch (InterruptedException ie) {
-                        }
-
-                        /* take the screenshot */
-                        try {
-                            messenger.send(msg);
-                        } catch (RemoteException e) {
-                        }
-                    }
-                }
-
-                @Override
-                public void onServiceDisconnected(ComponentName name) {
-                }
-            };
-            if (mContext.bindService(intent, conn, mContext.BIND_AUTO_CREATE)) {
-                mScreenshotConnection = conn;
-                mHDL.postDelayed(mScreenshotTimeout, 10000);
-            }
-        }
     }
 }
